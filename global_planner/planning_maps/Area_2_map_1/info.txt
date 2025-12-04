@@ -1,0 +1,10 @@
+=== Processing Statistics ===
+Total pixels: 160000 (each pixel = 0.25m x 0.25m = 0.0625m²)
+Background: 105110 (65.7%)
+Rock: 49031 (30.6%)
+Sand: 5859 (3.7%)
+Individual corals: 0 (0.0%) - 0 corals total
+Original resolution: 0.1m/pixel -> Downsampled to: 0.25m/pixel (factor 2.5)
+Total area covered: 10000.0 m²
+Range X: (1000, 2000)
+Range Y: (1500, 2500)
