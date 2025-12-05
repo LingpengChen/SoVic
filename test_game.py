@@ -4,6 +4,11 @@ import math
 import sys
 import os
 
+from utils.param import SONAR_RADIUS, SONAR_ANGLE, CAM_FOV
+from utils.param import START_X, START_Y
+from utils.param import true_positive_rate, false_positive_rate
+from utils.param import GAME_FPS, MAP_DIR
+from utils.param import KEY_VELOCITY, KEY_ANGULAR_VELOCITY
 # ==========================================
 # 1. 机器人与控制器 (保留你的原始代码)
 # ==========================================
@@ -38,7 +43,7 @@ class OmnidirectionalRobot:
         return np.array([self.x, self.y, self.theta])
 
 class InputController:
-    def __init__(self, key_velocity=2.0, key_angular_velocity=1.5):
+    def __init__(self, key_velocity=KEY_VELOCITY, key_angular_velocity=KEY_ANGULAR_VELOCITY):
         self.key_velocity = key_velocity
         self.key_angular_velocity = key_angular_velocity
     
@@ -158,9 +163,17 @@ class CoralMap:
     def update_sensors(self, robot_x, robot_y, robot_theta):
         """更新传感器读数并统计分数"""
         
+        # ==========================================
+        # 0. 重置声纳状态 (Transient State Reset)
+        # ==========================================
+        # 规则：如果在 t_i+1 时刻没看到，状态就要变回 0。
+        # 最简单的实现方式：每帧开始先把所有 "1" (Sonar Detected) 擦除变成 "0" (Unknown)
+        # "2" (Confirmed) 是永久的，保持不变
+        self.status_mask[self.status_mask == 1] = 0
+
         # --- 1. Camera Update (High Priority, High Confidence) ---
         # 假设相机视野是一个 2m x 2m 的矩形 (半边长 1.0)
-        cam_half_size = 1.5 
+        cam_half_size = CAM_FOV / 2
         cam_mask, (r1, r2, c1, c2) = self.get_local_grid_mask(
             robot_x, robot_y, robot_theta, max_dist=cam_half_size, shape='square'
         )
@@ -187,9 +200,9 @@ class CoralMap:
             self.status_mask[r1:r2, c1:c2][visible_ground] = 2
 
         # --- 2. Sonar Update (Probabilistic) ---
-        # 假设声纳半径 8m，FOV 60度
-        sonar_radius = 8.0
-        sonar_fov = math.radians(60)
+        # 假设声纳半径 5m，FOV 60度
+        sonar_radius = SONAR_RADIUS
+        sonar_fov = math.radians(SONAR_ANGLE)
         sonar_mask, (r1, r2, c1, c2) = self.get_local_grid_mask(
             robot_x, robot_y, robot_theta, max_dist=sonar_radius, fov_angle=sonar_fov, shape='sector'
         )
@@ -197,24 +210,40 @@ class CoralMap:
         if sonar_mask is not None:
             local_grid = self.grid[r1:r2, c1:c2]
             local_status = self.status_mask[r1:r2, c1:c2]
-            
-            # 计算距离以应用概率
+
+            # 1. 计算距离以应用概率
             grid_rows = np.arange(r1, r2)
             grid_cols = np.arange(c1, c2)
             gx, gy = np.meshgrid(grid_cols * self.cell_size + self.cell_size/2, 
                                  grid_rows * self.cell_size + self.cell_size/2)
             dists = np.sqrt((gx - robot_x)**2 + (gy - robot_y)**2)
+            dists[~sonar_mask] = np.inf  # 不在声纳范围内的点设为无穷大
+            # 归一化距离 (0.0 ~ 1.0)
+            d_norm = np.clip(dists / sonar_radius, 0, 1)
+            # 2. 定义概率模型 (参考你的公式描述)
+            p_tp = true_positive_rate(d_norm)
+
+            # False Positive Rate (FP): 距离越远噪声越大。近处0.01，远处0.1
+            # 这意味着远处有5%的概率把石头看成珊瑚
+            p_fp = false_positive_rate(d_norm)
+
+            # 3. 判断检测逻辑 (Measurement Model)
+            random_roll = np.random.rand(*dists.shape)
+            # 情况 A: 真实存在珊瑚 (Grid=2) -> 使用 TP 概率
+            hit_real = (local_grid == 2) & (random_roll < p_tp)
             
-            # 概率模型: P_detection = max(0, 0.9 - 0.1 * dist)
-            probs = np.clip(0.6 - 0.12 * dists, 0, 1)
-            random_roll = np.random.rand(*probs.shape)
-            
+            # 情况 B: 真实是石头 (Grid!=2) -> 使用 FP 概率
+            hit_fake = (local_grid == 1) & (random_roll < p_fp)
+
+
             # 成功检测的条件
-            hits = sonar_mask & (local_grid == 2) & (random_roll < probs)
+            detection = sonar_mask & (hit_real | hit_fake)
+            # detection = sonar_mask & (hit_fake)
             
             # 更新状态为 1 (Sonar Detected / Suspected)
             # 只有当它还不是2(已确认)时才更新
-            self.status_mask[r1:r2, c1:c2][hits & (local_status != 2)] = 1
+            update_mask = detection & (local_status != 2)
+            self.status_mask[r1:r2, c1:c2][update_mask] = 1
 
 # ==========================================
 # 3. 游戏主循环与渲染
@@ -228,12 +257,16 @@ class Game:
         pygame.display.set_caption("Find Coral - AUV Simulation")
         
         # 颜色定义
-        self.COLOR_BG = (20, 30, 40)         # 深海背景
-        self.COLOR_SAND = (194, 178, 128)    # 沙地
-        self.COLOR_ROCK = (100, 100, 100)    # 岩石
-        self.COLOR_CORAL_HIDDEN = (100, 100, 100) # 未被探测的珊瑚看起来像岩石
-        self.COLOR_CORAL_SONAR = (255, 165, 0) # 声纳探测到的(橙色)
-        self.COLOR_CORAL_CONFIRMED = (255, 50, 50) # 相机确认的(红色)
+        # 颜色定义
+        self.COLOR_BG = (20, 30, 40)         
+        self.COLOR_SAND = (194, 178, 128)    
+        self.COLOR_ROCK = (100, 100, 100)    
+        
+        # 状态颜色
+        self.COLOR_CORAL_CONFIRMED = (255, 50, 50)   # Camera确认 (红色)
+        self.COLOR_CORAL_SONAR = (255, 165, 0)       # Sonar TP (橙色 - 真实信号)
+        self.COLOR_SONAR_FP = (255, 255, 100)        # Sonar FP (淡黄色 - 虚假噪声/误报)
+        
         self.COLOR_ROBOT = (0, 255, 255)
         self.COLOR_SONAR_VIEW = (0, 255, 0, 50) # 半透明绿色
         
@@ -241,9 +274,9 @@ class Game:
         self.font = pygame.font.SysFont("Arial", 20)
         
         # 初始化对象
-        self.map_data = CoralMap(map_file="./Area_2_map_1_0.25m.npy" ,grid_size=(300, 300), cell_size=0.3) # 90m x 90m map
-        start_x = 0
-        start_y = 0
+        self.map_data = CoralMap(map_file=MAP_DIR ,grid_size=(300, 300), cell_size=0.3) # 90m x 90m map
+        start_x = START_X
+        start_y = START_Y
         # start_x = self.map_data.width_meters / 2
         # start_y = self.map_data.height_meters / 2
         self.robot = OmnidirectionalRobot(x=start_x, y=start_y)
@@ -266,7 +299,7 @@ class Game:
     def run(self):
         running = True
         while running:
-            dt = self.clock.tick(60) / 1000.0  # seconds
+            dt = self.clock.tick(GAME_FPS) / 1000.0  # seconds 表示每一帧之间的时间间隔（以秒为单位）
             
             # Event handling
             for event in pygame.event.get():
@@ -335,10 +368,12 @@ class Game:
                     elif val == 2: color = self.COLOR_CORAL_CONFIRMED
                 elif status == 1: # Sonar Detected
                     if val == 2: 
-                        color = self.COLOR_CORAL_SONAR # 远处的亮点
-                    else:
-                        # 声纳看到的非珊瑚区域，显示暗淡的岩石色
-                        color = (50, 50, 60) 
+                        # True Positive (TP): 地图上确实是珊瑚，且被声纳抓到了
+                        color = self.COLOR_CORAL_SONAR # 橙色
+                    elif val == 1:
+                        # False Positive (FP): 地图上是石头，但被声纳误报为目标
+                        # 显示为“鬼影”颜色(淡黄)，以便调试观察噪声分布
+                        color = self.COLOR_SONAR_FP 
                 else: # Unexplored
                     # 迷雾中的岩石和沙地，或者完全黑色
                     if val == 1: color = (40, 40, 40) # 隐约可见障碍物
@@ -348,8 +383,8 @@ class Game:
 
         # --- 绘制传感器 FOV (可视化辅助) ---
         # 绘制声纳扇形 (两条线)
-        sonar_r = 8.0 * scale
-        angle_fov = math.radians(60)
+        sonar_r = SONAR_RADIUS * scale
+        angle_fov = math.radians(SONAR_ANGLE)
         start_angle = self.robot.theta - angle_fov/2
         end_angle = self.robot.theta + angle_fov/2
         
@@ -369,7 +404,7 @@ class Game:
         pygame.draw.arc(self.screen, (0, 255, 0), rect_rect, -end_angle, -start_angle, 1)
 
         # 绘制相机矩形
-        cam_size_px = 3.0 * scale # 3m box
+        cam_size_px = CAM_FOV * scale # 3m box
         # 需要旋转矩形
         # 这里简化，只画一个红色的框跟随机器人
         surf = pygame.Surface((cam_size_px, cam_size_px), pygame.SRCALPHA)
@@ -380,7 +415,7 @@ class Game:
 
         # --- 绘制机器人 ---
         # 简单的三角形
-        robot_radius = 10
+        robot_radius = 5
         angle = self.robot.theta
         pt1 = (robot_screen_pos[0] + robot_radius * math.cos(angle), robot_screen_pos[1] + robot_radius * math.sin(angle))
         pt2 = (robot_screen_pos[0] + robot_radius * math.cos(angle + 2.5), robot_screen_pos[1] + robot_radius * math.sin(angle + 2.5))
