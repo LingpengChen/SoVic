@@ -5,6 +5,7 @@ from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 import time
 from dataclasses import dataclass
+from matplotlib import colors
 
 # ==========================================
 # 1. 配置管理 (Configuration)
@@ -17,22 +18,21 @@ class PlannerConfig:
     """
     # 地图属性
     pixel_resolution: float = 0.25  # 每个像素代表的实际距离 (米/pixel)
-    
+
     # 节点生成参数
-    grid_interval_pixels: int = 20  # 采样间隔 (pixels)，对应 5米
-    fov_size_pixels: int = 20       # 视场大小 (pixels)，对应 5米 x 5m
-    
+    grid_interval_m: float = 5.0  # 采样间隔 (米)
+
     # 优化器缩放因子 (OR-Tools只接受整数)
     # 如果 path_cost_scale_factor = 100, 代表 1米 = 100 cost unit
     path_cost_scale_factor: int = 100    
     prize_scale_factor: int = 10000 
-    
+
     # 路径规划约束
     path_budget_meters: float = 1000.0 # 最大路径预算 (米)
-    
+
     # 起点坐标 (米)
     depot_start_coords_m: tuple = (0.0, 0.0) 
-    
+
     # 求解器限制
     solver_time_limit_sec: int = 3
 
@@ -44,15 +44,16 @@ class GlobalPlanner:
     def __init__(self, config: PlannerConfig):
         self.cfg = config
 
-    def load_map(self, filepath: str) -> np.ndarray:
-        print(f"[-] 正在加载地图: {filepath}")
-        try:
-            game_map = np.load(filepath)
-            return game_map
-        except FileNotFoundError:
-            raise FileNotFoundError(f"找不到地图文件: {filepath}")
+    def get_prior_map(self, game_map: np.ndarray) -> None:
+        self.game_map = game_map
 
-    def generate_nodes_and_prizes(self, game_map: np.ndarray):
+    def plan_path(self):
+        nodes_m, prizes = self.generate_nodes_and_prizes()
+        cost_mat = self.calculate_cost_matrix(nodes_m)
+        path_indices, total_prize, dist_m = self.solve_orienteering_problem(prizes, cost_mat)
+        return nodes_m, path_indices, dist_m, total_prize
+
+    def generate_nodes_and_prizes(self):
         """
         [修改重点] 
         1. 计算FOV内兴趣区域的几何重心 (Centroid) 代替网格中心。
@@ -61,32 +62,32 @@ class GlobalPlanner:
         print("[-] 正在生成候选节点 (计算重心 & 转换为米)...")
         nodes_m = []  # 存储米制坐标
         prizes = []
-        
-        map_h, map_w = game_map.shape
-        fov_half = self.cfg.fov_size_pixels // 2
-        interval = self.cfg.grid_interval_pixels
-        fov_area = self.cfg.fov_size_pixels ** 2
+
+        map_h, map_w = self.game_map.shape
+        grid_interval = int(self.cfg.grid_interval_m / self.cfg.pixel_resolution)
+        grid_interval_half = int(self.cfg.grid_interval_m / self.cfg.pixel_resolution / 2)
+        grid_area = (self.cfg.grid_interval_m / self.cfg.pixel_resolution) ** 2
         res = self.cfg.pixel_resolution
 
         # 网格化滑动窗口
-        for cy in range(fov_half, map_h - fov_half + 1, interval):
-            for cx in range(fov_half, map_w - fov_half + 1, interval):
+        for cy in range(grid_interval_half, map_h - grid_interval_half + 1, grid_interval):
+            for cx in range(grid_interval_half, map_w - grid_interval_half + 1, grid_interval):
                 # 定义 FOV 边界 (Pixel)
-                min_y, max_y = cy - fov_half, cy + fov_half
-                min_x, max_x = cx - fov_half, cx + fov_half
+                min_y, max_y = cy - grid_interval_half, cy + grid_interval_half
+                min_x, max_x = cx - grid_interval_half, cx + grid_interval_half
                 
                 # 提取 FOV 切片
-                fov_slice = game_map[min_y:max_y, min_x:max_x]
+                grid_slice = self.game_map[min_y:max_y, min_x:max_x]
                 
                 # 1. 提取兴趣点 (1:岩石, 2:珊瑚)
                 # mask 是一个布尔矩阵，True表示感兴趣
-                mask = (fov_slice == 1) | (fov_slice == 2)
+                mask = (grid_slice != 0) 
                 interest_count = np.sum(mask)
                 
                 if interest_count > 0:
                     # 计算归一化奖励
-                    prize = interest_count / fov_area
-                    
+                    prize = interest_count / grid_area
+
                     # --- [修改核心] 计算重心并转为米 ---
                     
                     # np.nonzero 返回的是相对于 slice 的局部坐标 (y_rel, x_rel)
@@ -243,8 +244,8 @@ def visualize_results(game_map, all_nodes_m, path_indices, config: PlannerConfig
 
     plt.figure(figsize=(10, 10))
 
-    colors = ['#F0E68C', '#2F4F4F', '#FFC0CB'] 
-    cmap = plt.matplotlib.colors.ListedColormap(colors)
+    color_list = ['#F0E68C', '#2F4F4F', '#FFC0CB'] 
+    cmap = colors.ListedColormap(color_list)
 
     # [关键修改] 计算地图的物理尺寸 (米)
     map_h_px, map_w_px = game_map.shape
@@ -258,7 +259,7 @@ def visualize_results(game_map, all_nodes_m, path_indices, config: PlannerConfig
 
     # === [添加代码 START] 2. 画分界线 (Grid Lines) ===
     # 计算网格的物理步长 (例如 20px * 0.25 = 5米)
-    step_m = config.grid_interval_pixels * config.pixel_resolution
+    step_m = config.grid_interval_m
 
     # 画垂直线
     for x in np.arange(0, map_w_m + step_m, step_m):
@@ -311,25 +312,25 @@ if __name__ == '__main__':
 
     config = PlannerConfig(
         pixel_resolution=0.25,      
-        grid_interval_pixels=20,    
-        fov_size_pixels=20,         
-        path_budget_meters=1500.0,   # 1000米预算
+        grid_interval_m=5.0,    
+        path_budget_meters=1500.0,   
         
         # 优化参数
         path_cost_scale_factor=1*100,      # 1米 = 100 cost
         prize_scale_factor=1*10000,   
-        solver_time_limit_sec=5     
+        solver_time_limit_sec=3     
     )
     
     planner = GlobalPlanner(config)
-    map_path = "/home/clp/workspace/SoViC/map/planning_maps/Area_2_map_1/Area_2_map_1_0.25m.npy"
+    map_path = "/home/clp/workspace/SoVic/planner/planning_maps/Area_2_map_1/Area_2_map_1_0.25m.npy"
 
     try:
-        coral_map = planner.load_map(map_path)
+        coral_map = np.load(map_path)
+        substrate_prior = (coral_map > 0).astype(bool)
+
+        planner.get_prior_map(substrate_prior)
         
-        nodes_m, prizes = planner.generate_nodes_and_prizes(coral_map)
-        cost_mat = planner.calculate_cost_matrix(nodes_m)
-        path_indices, total_prize, dist_m = planner.solve_orienteering_problem(prizes, cost_mat)
+        nodes_m, path_indices, dist_m, total_prize = planner.plan_path()
 
         if path_indices is not None:
             print(f"\n[-] 最终结果:")

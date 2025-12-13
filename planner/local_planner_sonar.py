@@ -60,7 +60,7 @@ class InfoTrajectoryPlanner:
         # 假设以 80% 的最大速度直飞所需的时间
         estimated_time = dist_total / (self.v_max * 0.8)
         # 增加 50% 的 buffer 时间用于探索
-        buffer_factor = 1.5
+        buffer_factor = 1.2
         N = int((estimated_time * buffer_factor) / self.dt)
         # 限制最小和最大步数
         N = max(20, min(N, 80)) 
@@ -157,7 +157,7 @@ class InfoTrajectoryPlanner:
         opti.set_initial(X[0, :], np.linspace(start_state[0], goal_state[0], N+1))
         opti.set_initial(X[1, :], np.linspace(start_state[1], goal_state[1], N+1))
         
-        opts = {'ipopt.print_level': 5, 'ipopt.max_iter': 500, 'ipopt.tol': 1e-3}
+        opts = {'ipopt.print_level': 5, 'ipopt.max_iter': 100, 'ipopt.tol': 1e-3}
         opti.solver('ipopt', opts)
         
         try:
@@ -183,8 +183,8 @@ if __name__ == "__main__":
     
     start = np.array([1.0, 1.0, 0.0])
     goal = np.array([9.0, 9.0, 0.0])
-    # init_entropy = np.ones(planner.n_cells) # 全黑地图
-    init_entropy = np.where(planner.X_flat < (planner.map_size / 2.0)+2, 1.0, 0.0).astype(float)
+    init_entropy = np.ones(planner.n_cells) # 全黑地图
+    # init_entropy = np.where(planner.X_flat < (planner.map_size / 2.0)+2, 1.0, 0.0).astype(float)
 
     
     # 2. 规划

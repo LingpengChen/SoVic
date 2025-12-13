@@ -179,7 +179,10 @@ with open(info_txt_path, 'w') as info_file:
     info_file.write(f"Individual corals: {np.sum(processed_array == 3)} ({np.sum(processed_array == 3)/processed_array.size*100:.1f}%) - {np.sum(processed_array == 3)} corals total\n")
     info_file.write(f"Original resolution: 0.1m/pixel -> Downsampled to: 0.25m/pixel (factor {downsample_factor})\n")
     info_file.write(f"Total area covered: {processed_array.size * 0.0625:.1f} m²\n")
-    info_file.write(f"Range X: {range_x}\n")
-    info_file.write(f"Range Y: {range_y}\n")
+    info_file.write(f"Range X(pixel): {range_x}\n")
+    info_file.write(f"Range Y(pixel): {range_y}\n")
+    info_file.write(f"Range X(m): {range_x[0]*0.1} - {range_x[1]*0.1}\n")
+    info_file.write(f"Range Y(m): {range_y[0]*0.1} - {range_y[1]*0.1}\n")
+
 
 print(f"Processing statistics saved as: {info_txt_path}")
